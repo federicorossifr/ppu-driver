@@ -1,25 +1,3 @@
-/*
-Like every other hardware, we could interact with PCI on x86
-using only IO instructions and memory operations.
-
-But PCI is a complex communication protocol that the Linux kernel
-implements beautifully for us, so let's use the kernel API.
-
-This example relies on the QEMU "edu" educational device.
-Grep QEMU source for the device description, and keep it open at all times!
-
--   edu device source and spec in QEMU tree:
-	- https://github.com/qemu/qemu/blob/v2.7.0/hw/misc/edu.c
-	- https://github.com/qemu/qemu/blob/v2.7.0/docs/specs/edu.txt
--   http://www.zarb.org/~trem/kernel/pci/pci-driver.c inb outb runnable example (no device)
--   LDD3 PCI chapter
--   another QEMU device + module, but using a custom QEMU device:
-	- https://github.com/levex/kernel-qemu-pci/blob/31fc9355161b87cea8946b49857447ddd34c7aa6/module/levpci.c
-	- https://github.com/levex/kernel-qemu-pci/blob/31fc9355161b87cea8946b49857447ddd34c7aa6/qemu/hw/char/lev-pci.c
--   https://is.muni.cz/el/1433/podzim2016/PB173/um/65218991/ course given by the creator of the edu device.
-	In Czech, and only describes API
--   http://nairobi-embedded.org/linux_pci_device_driver.html
-*/
 
 #include <asm/uaccess.h> /* put_user */
 #include <linux/cdev.h> /* cdev_ */
@@ -30,27 +8,10 @@ Grep QEMU source for the device description, and keep it open at all times!
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/dma-mapping.h>
-/* Each PCI device has 6 BAR IOs (base address register) as per the PCI spec.
- *
- * Each BAR corresponds to an address range that can be used to communicate with the PCI.
- *
- * Eech BAR is of one of the two types:
- *
- * - IORESOURCE_IO: must be accessed with inX and outX
- * - IORESOURCE_MEM: must be accessed with ioreadX and iowriteX
- *   	This is the saner method apparently, and what the edu device uses.
- *
- * The length of each region is defined BY THE HARDWARE, and communicated to software
- * via the configuration registers.
- *
- * The Linux kernel automatically parses the 64 bytes of standardized configuration registers for us.
- *
- * QEMU devices register those regions with:
- *
- *     memory_region_init_io(&edu->mmio, OBJECT(edu), &edu_mmio_ops, edu,
- *                     "edu-mmio", 1 << 20);
- *     pci_register_bar(pdev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &edu->mmio);
- **/
+ #include <linux/wait.h>
+ #include <linux/poll.h>
+
+
 #define BAR 0
 #define CDEV_NAME "lkmc_ppu"
 #define EDU_DEVICE_ID 0xFEFE
@@ -71,14 +32,15 @@ static struct pci_device_id pci_ids[] = {
 	{ 0, }
 };
 MODULE_DEVICE_TABLE(pci, pci_ids);
-
+static DECLARE_WAIT_QUEUE_HEAD(ppu_wait);
 static int pci_irq;
 static int major;
 static struct pci_dev *pdev;
 static void __iomem *mmio;
 static dma_addr_t dma_handle; // to the card
 static void* dma_cpu_addr; // cpu addr
-const char __user *usr_dma_buf;
+//const char __user *usr_dma_buf;
+bool sem_t = false;
 static ssize_t read(struct file *filp, char __user *buf, size_t len, loff_t *off)
 {
 	ssize_t ret;
@@ -122,10 +84,12 @@ static ssize_t write(struct file *filp, const char __user *buf, size_t len, loff
 				pr_info("user writing to dma dst, %llx\n",addr_buf); 
 				pr_info("sub, %llx\n",addr_buf); 
 
-				usr_dma_buf = addr_buf;
+				//usr_dma_buf = addr_buf;
 				
 				break;
 			case DMA_CNT: pr_info("user writing to dma cnt, %ld\n",kbuf); break;
+			case DMA_CMD: pr_info("user writing to dma CMD, %ld\n",kbuf); sem_t = false; break;
+
 			default: break;
 		}
 
@@ -152,6 +116,15 @@ static loff_t llseek(struct file *filp, loff_t off, int whence)
 	return off;
 }
 
+
+ static unsigned int fpoll(struct file *file, poll_table *wait)
+ {
+     poll_wait(file, &ppu_wait, wait);
+     if (sem_t)
+         return POLLIN | POLLRDNORM;
+     return 0;
+ }
+
 /* These fops are a bit daft since read and write interfaces don't map well to IO registers.
  *
  * One ioctl per register would likely be the saner option. But we are lazy.
@@ -162,6 +135,7 @@ static struct file_operations fops = {
 	.llseek  = llseek,
 	.read    = read,
 	.write   = write,
+	.poll    = fpoll
 };
 
 static irqreturn_t irq_handler(int irq, void *dev)
@@ -176,6 +150,8 @@ static irqreturn_t irq_handler(int irq, void *dev)
 		pr_info("interrupt irq = %d dev = %d irq_status = %llx\n",
 				irq, devi, (unsigned long long)irq_status);
 		/* Must do this ACK, or else the interrupts just keeps firing. */
+		sem_t = true;
+ 		wake_up_interruptible(&ppu_wait);		
 		iowrite32(irq_status, mmio + IO_IRQ_ACK);
 		ret = IRQ_HANDLED;
 	} else {

@@ -1,5 +1,6 @@
 #include "stdio.h"
 #include "stdint.h"
+#include <poll.h>
 #define PPU_DEV "/dev/lkmc_ppu"
 #define PPU_MODE 8
 #define PPU_STATUS 0x24
@@ -87,7 +88,12 @@ int main() {
     fseek(fp, PPU_DMA_CMD, SEEK_SET );  
     fwrite(&cmd,1,sizeof(cmd),fp);
     fflush(fp);   
-    wfdma(fp);   
+    //wfdma(fp);   
+
+    struct pollfd pfd;
+    pfd.fd = fileno(fp);
+    pfd.events = POLLIN;
+    poll(&pfd,1,-1);
     fclose(fp);
   
    return(0); 
