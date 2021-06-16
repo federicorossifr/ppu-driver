@@ -10,6 +10,7 @@
 #define PPU_DMA_DST 0x8c
 #define PPU_DMA_CNT 0x94
 #define PPU_DMA_CMD 0x9c
+#define PPU_DMA_RBACK 0xF4
 
 typedef FILE* PPU_PTR;
 
@@ -60,10 +61,13 @@ void wfdma(PPU_PTR ppu) {
 // 0x5
 // 0b101
 
+// 0x7
+// 0b111
+
 int main() {
     PPU_PTR fp;
     float f = 0.5;
-    uint32_t i = 0xffffffff, cnt = 4, cmd = 0x5, dst = 0x40000;
+    uint32_t i = 0xffffffff, cnt = 4, cmd = 0x5, cmdin = 0x7, dst = 0x40000;
     float *ffp = &f;
     uint32_t* ip = &i, *dstp = &dst;
     fp = fopen(PPU_DEV,"r+");
@@ -77,9 +81,7 @@ int main() {
     fwrite(&ip,1,sizeof(ip),fp);
     fflush(fp); 
 
-    /*fseek(fp, PPU_DMA_DST, SEEK_SET );  
-    fwrite(&dstp,1,sizeof(dstp),fp);
-    fflush(fp); */
+
 
     fseek(fp, PPU_DMA_CNT, SEEK_SET );  
     fwrite(&cnt,1,sizeof(cnt),fp);
@@ -94,6 +96,28 @@ int main() {
     pfd.fd = fileno(fp);
     pfd.events = POLLIN;
     poll(&pfd,1,-1);
+
+
+    printf("Destination buffer: %llx\n",dstp);
+    fseek(fp, PPU_DMA_DST, SEEK_SET );  
+    fwrite(&dstp,1,sizeof(dstp),fp);
+    fflush(fp);
+
+    fseek(fp, PPU_DMA_CMD, SEEK_SET );  
+    fwrite(&cmdin,1,sizeof(cmdin),fp);
+    fflush(fp);
+
+    struct pollfd pfd2;
+    pfd2.fd = fileno(fp);
+    pfd2.events = POLLIN;           
+    poll(&pfd2,1,-1);
+
+    fseek(fp, PPU_DMA_RBACK, SEEK_SET );  
+    fread(&dst,4,4,fp);
+
+
+    printf("Received DMA response: %lx\n",*dstp);
+
     fclose(fp);
   
    return(0); 

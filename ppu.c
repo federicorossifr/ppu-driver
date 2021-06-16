@@ -10,7 +10,7 @@
 #include <linux/dma-mapping.h>
  #include <linux/wait.h>
  #include <linux/poll.h>
-
+#include <linux/workqueue.h>            // Required for workqueues
 
 #define BAR 0
 #define CDEV_NAME "lkmc_ppu"
@@ -24,6 +24,7 @@
 #define DMA_DST 0x88
 #define DMA_CNT 0x90
 #define DMA_CMD 0x98
+#define DMA_RBACK 0xF4
 #define DMA_MASK DMA_BIT_MASK(28)
 MODULE_LICENSE("GPL");
 
@@ -39,8 +40,12 @@ static struct pci_dev *pdev;
 static void __iomem *mmio;
 static dma_addr_t dma_handle; // to the card
 static void* dma_cpu_addr; // cpu addr
-//const char __user *usr_dma_buf;
+const void *usr_dma_buf = 0;
 bool sem_t = false;
+
+
+
+
 static ssize_t read(struct file *filp, char __user *buf, size_t len, loff_t *off)
 {
 	ssize_t ret;
@@ -48,6 +53,18 @@ static ssize_t read(struct file *filp, char __user *buf, size_t len, loff_t *off
 	if (*off % 4 || len == 0) {
 		ret = 0;
 	} else {
+		
+		switch(*off) {	
+			case DMA_RBACK: //finalize dma read
+				pr_info("Data at dma_cpu_addr %lx: %d\n",dma_cpu_addr,*(int*)dma_cpu_addr);
+				pr_info("Copying buffer from %lx to %lx\n",dma_cpu_addr,usr_dma_buf);
+				int wr = copy_to_user((char* __user)usr_dma_buf,dma_cpu_addr,4);
+				pr_info("Copied %d bytes\n",wr);				
+				break;
+			default: break;
+		}	
+
+		
 		kbuf = ioread32(mmio + *off);
 		if (copy_to_user(buf, (void *)&kbuf, 4)) {
 			ret = -EFAULT;
@@ -69,6 +86,9 @@ static ssize_t write(struct file *filp, const char __user *buf, size_t len, loff
 
 		switch(*off) {
 			case DMA_SRC: //handle DMA_SRC write from user
+				// initialize request
+				usr_dma_buf = 0;
+				sem_t = false;
 				copy_from_user((void *)&addr_buf, buf, 8);
 				pr_info("user writing to dma src, %llx\n",addr_buf); 
 				pr_info("copying to internal buffer, %llx\n",dma_cpu_addr); 
@@ -80,13 +100,22 @@ static ssize_t write(struct file *filp, const char __user *buf, size_t len, loff
 				return ret;
 
 			case DMA_DST: //handle DMA_CNT write from user
+				sem_t = false;
 				copy_from_user((void *)&addr_buf, buf, 8);
 				pr_info("user writing to dma dst, %llx\n",addr_buf); 
 				pr_info("sub, %llx\n",addr_buf); 
+				usr_dma_buf = addr_buf;
+				pr_info("saved destination buffer: %llx\n",usr_dma_buf);
 
+				
+				iowrite64(DMA_START, mmio + DMA_SRC);
+				iowrite64(dma_handle, mmio + DMA_DST);				
 				//usr_dma_buf = addr_buf;
 				
 				break;
+
+
+
 			case DMA_CNT: pr_info("user writing to dma cnt, %ld\n",kbuf); break;
 			case DMA_CMD: pr_info("user writing to dma CMD, %ld\n",kbuf); sem_t = false; break;
 
@@ -120,6 +149,7 @@ static loff_t llseek(struct file *filp, loff_t off, int whence)
  static unsigned int fpoll(struct file *file, poll_table *wait)
  {
      poll_wait(file, &ppu_wait, wait);
+	 pr_info("Probed: %d",(int)sem_t);
      if (sem_t)
          return POLLIN | POLLRDNORM;
      return 0;
@@ -150,8 +180,10 @@ static irqreturn_t irq_handler(int irq, void *dev)
 		pr_info("interrupt irq = %d dev = %d irq_status = %llx\n",
 				irq, devi, (unsigned long long)irq_status);
 		/* Must do this ACK, or else the interrupts just keeps firing. */
-		sem_t = true;
- 		wake_up_interruptible(&ppu_wait);		
+
+			sem_t = true;
+ 			wake_up_interruptible(&ppu_wait);		
+	
 		iowrite32(irq_status, mmio + IO_IRQ_ACK);
 		ret = IRQ_HANDLED;
 	} else {
